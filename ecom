@@ -1,0 +1,5 @@
+#! /usr/bin/env python
+
+import fr
+optdict = fr.get_options()
+fr.donations(optdict)

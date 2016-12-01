@@ -1,0 +1,231 @@
+#! /usr/bin/env python
+
+from datetime import datetime
+import dateutil.parser
+import dateutil.relativedelta
+import MySQLdb, sys
+import fr_util
+
+TSFORMAT = '%Y%m%d%H%M%S'
+DATEFORMAT = '%Y-%m-%d %H:%M:%S'
+
+class color:
+   PURPLE    = '\033[95m'
+   CYAN      = '\033[96m'
+   DARKCYAN  = '\033[36m'
+   BLUE      = '\033[94m'
+   GREEN     = '\033[92m'
+   YELLOW    = '\033[93m'
+   RED       = '\033[91m'
+   DARKGRAY  = '\033[90m'
+   BOLD      = '\033[1m'
+   UNDERLINE = '\033[4m'
+   END       = '\033[0m'
+
+
+def get_options():
+    from argparse import ArgumentParser
+    parser = ArgumentParser(
+        description="Get results for a simple test."
+        )
+
+    parser.add_argument('substring', nargs='?', default='.*',
+        help='Banner substring e.g. B1516_0902_en6C_ipd. You can even use a regular expression if you like.')
+
+    # We'll run the date parser on these later
+    parser.add_argument('-s', '--start', dest='start',
+        help='Start time (UTC). If not specified, defaults to one month ago.')
+    parser.add_argument('-e', '--end', dest='end',
+        help='End time (UTC). If not specified, defaults to now.')
+
+    parser.add_argument('--campaign', dest='campaign',
+        help='Filter results to specific campaign')
+
+    parser.add_argument('--language', dest='language',
+        help='Filter results to specific language (note that not all impressions have an associated language)')
+    parser.add_argument('--country', dest='country',
+        help='Filter results to specific country code')
+
+    parser.add_argument('--combine', action='store_true',
+        help='Combine results for banners where last part of name is identical')
+
+    parser.add_argument('--format', dest='format', default='tsv',
+        choices=fr_util.FORMAT_CHOICES,
+        help='Output format. For example "mediawiki" gives a table suitable for posting on wiki.')
+
+    parser.add_argument('--sql', action='store_true',
+        help='Show SQL used (for debugging)')
+
+    if len(sys.argv) == 1:
+        # No arguments, show instructions
+        parser.print_help()
+        sys.exit(1)
+
+    args = vars(parser.parse_args())
+    return args
+
+
+def build_query():
+    if args['combine']:
+        # take the last part
+        banner_select_dons = "SUBSTRING_INDEX( SUBSTRING_INDEX(ct.utm_source, '.', 1), '_', -1 )"
+        banner_select_imps = "SUBSTRING_INDEX( bi.banner, '_', -1 )"
+    else:
+        banner_select_dons = "SUBSTRING_INDEX( ct.utm_source, '.', 1 )"
+        banner_select_imps = "bi.banner"
+
+    query = """SELECT
+        dons.b AS banner,
+        donations,
+        impressions,
+        CAST(donations/impressions AS DOUBLE) AS "dons/i",
+        amount,
+        CAST(amount/impressions AS DOUBLE) AS "amount/i",
+        clicks,
+        CAST(clicks/impressions AS DOUBLE) AS "clicks/i",
+        CAST(donations/clicks AS DOUBLE) AS "dons/clicks",
+        amount50,
+        CAST(amount50/impressions AS DOUBLE) AS "amount50/i",
+        max,
+        CAST(amount/donations AS DOUBLE) AS avg,
+        CAST(amount50/donations AS DOUBLE) AS avg50
+    FROM (
+        SELECT """ + banner_select_dons + """ AS b,
+            SUM(not isnull(cc.id)) AS donations,
+            COUNT(ct.id) AS clicks,
+            SUM(cc.total_amount) AS amount,
+            SUM(if(cc.total_amount > 50, 50, cc.total_amount)) AS amount50,
+            MAX(cc.total_amount) AS max
+        FROM drupal.contribution_tracking ct
+            LEFT JOIN civicrm.civicrm_contribution cc ON ct.contribution_id = cc.id
+        WHERE ts BETWEEN %(start_ts)s AND %(end_ts)s
+            AND ct.utm_source REGEXP %(substring)s"""
+
+    if args['campaign']:
+        query += "AND utm_campaign=%(campaign)s"
+    if args['country']:
+        query += "AND ct.country=%(country)s"
+    if args['language']:
+        query += "AND ct.language=%(language)s"
+
+    query += """
+        GROUP BY
+            b
+        ) dons
+    LEFT JOIN (
+        SELECT
+            """ + banner_select_imps + """ AS b,
+            sum(count) AS impressions
+        FROM pgehres.bannerimpressions bi
+            LEFT JOIN pgehres.country ON (country_id=country.id)
+            LEFT JOIN pgehres.language ON (language_id=language.id)
+        WHERE timestamp BETWEEN %(start_ts)s AND %(end_ts)s
+            AND banner REGEXP %(substring)s"""
+
+    if args['campaign']:
+        query += "AND campaign=%(campaign)s"
+    if args['country']:
+        query += "AND country.iso_code=%(country)s"
+    if args['language']:
+        query += "AND language.iso_code=%(language)s"
+
+    query += """
+        GROUP BY b ) imps
+    ON dons.b = imps.b
+    ORDER BY (banner REGEXP 'cnt$|ctrl$|cntrl$|control$') DESC, banner -- put control first
+    """
+
+    return query
+
+def get_data():
+    # Gets the raw results from the database
+    cursor.execute(query, args)
+    data = cursor.fetchall()
+    # print data
+    return data
+
+def format_results(data):
+    # Format results nicely and bundle into lists.
+    num = '{:,}' # number with thousands separator
+    usd = '${:,.2f}'
+    columns = ['banner', 'donations', 'imps', 'dons/i',
+                'amount', 'amount/i', 'clicks', 'clicks/i',
+                'dons/clicks', 'amount50', 'amount50/i',
+                'max', 'avg', 'avg50']
+    results = []
+    for i in data:
+
+        # For some reason it keeps returning None, change that to 0 so formatter doesn't choke
+        for x in i:
+            if i[x] == None:
+                i[x] = 0
+
+        row = [
+            str( i['banner'] ),
+            num.format( i['donations'] ),
+            num.format( i['impressions'] ),
+            '{:.8f}'.format( i['dons/i'] ),
+            usd.format( i['amount'] ),
+            '{:.6f}'.format( i['amount/i'] ),
+            num.format( i['clicks'] ),
+            '{:.6f}'.format( i['clicks/i'] ),
+            '{:.2%}'.format( i['dons/clicks'] ),
+            usd.format( i['amount50'] ),
+            '{:.6f}'.format( i['amount50/i'] ),
+            usd.format( i['max'] ),
+            usd.format( i['avg'] ),
+            usd.format( i['avg50'] )
+        ]
+        results.append(row)
+    return columns, results
+
+
+def get_thumbtack_link(data):
+    link = "https://www.thumbtack.com/labs/abba/#"
+    for row in data:
+        link += "{banner}={donations}%2C{impressions}&".format(**row)
+    link += "abba%3AintervalConfidenceLevel=0.95&abba%3AuseMultipleTestCorrection=true"
+    return link
+
+
+if __name__ == "__main__":
+    args = get_options()
+
+    if args['start']:
+        args['start'] = dateutil.parser.parse(args['start'])
+    else:
+        # default to 1 month ago
+        args['start'] = (datetime.now() + dateutil.relativedelta.relativedelta(months = -1))
+        print "You didn't specify a start time, defaulting to 1 month ago. The query will run faster if you can specify a start time."
+
+    if args['end']:
+        args['end'] = dateutil.parser.parse(args['end'])
+    else:
+        # default to now
+        args['end'] = datetime.now()
+
+    # Timestamp format for queries
+    args['start_ts'] = args['start'].strftime(TSFORMAT)
+    args['end_ts']   = args['end'].strftime(TSFORMAT)
+
+    cursor = fr_util.get_db_cursor(type='dict')
+    query  = build_query()
+    data   = get_data()
+    if args['sql']:
+        print cursor._last_executed
+
+    if args['country']:
+        print "Country: " + args['country']
+    if args['language']:
+        print "Language: " + args['language']
+
+    print "N.B. Banner impressions subject to at least 15 minutes delay"
+    print "From: " + args['start'].strftime(DATEFORMAT)
+    print "To: "   + args['end'].strftime(DATEFORMAT)
+    print
+
+    columns, results = format_results(data)
+
+    fr_util.print_table(columns, results, args['format'])
+    print color.UNDERLINE + get_thumbtack_link(data) + color.END
+    print

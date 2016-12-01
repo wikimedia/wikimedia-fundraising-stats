@@ -1,0 +1,107 @@
+#! /usr/bin/env python
+
+import time
+import MySQLdb, fr_util
+
+
+def get_options():
+    from argparse import ArgumentParser
+    parser = ArgumentParser(description='Get banner impressions (only accurate about 15 minutes after test)')
+
+    parser.add_argument('-s', '--start', dest='start',
+                        metavar='YYYYMMDDHHMMSS',
+                        help='Start time', 
+                        required=True)
+    parser.add_argument('-e', '--end', dest='end',
+                        metavar='YYYYMMDDHHMMSS',
+                        help='End time. If not specified, defaults to now',
+                        default=time.strftime('%Y%m%d%H%M%S'))
+    parser.add_argument('--sub', dest='substring', 
+                        help='Banner name substring e.g. B13_0905_badge')
+    parser.add_argument('-c', '--campaign', dest='campaign',
+                        help='Filter by campaign e.g. C14_enFI')
+    parser.add_argument('--country', dest='country',
+                        help='Filter by country e.g. GB')
+    parser.add_argument('--language', dest='language',
+                        help='Filter by language e.g. en')
+    parser.add_argument('-g', '--group_by', dest='group_by',
+                        metavar='bg', 
+                        help='Fields to group by. b=ban, c=country, g=language, t=campaign (test)',
+                        default='b')
+    parser.add_argument('-q', '--quiet', dest='quiet', action='store_true',
+                        help='Don\'t display SQL code')
+    parser.add_argument('--raw', dest='raw', action='store_true',
+                        help='For compatibility with ecom (has no effect)')
+    args = vars(parser.parse_args());
+    return args
+
+def build_query(args):
+    query =  "SELECT " 
+    for i in args['group_by']:
+        if i == 'b': query += 'banner, '
+        if i == 'c': query += 'country.iso_code AS country, '
+        if i == 'g': query += 'language.iso_code AS language, '
+        if i == 't': query += 'campaign,'
+    query += "SUM(count) AS ban_imps"
+
+    query += "\n FROM pgehres.bannerimpressions"
+    query += "\n   JOIN pgehres.country ON (country_id=country.id)"
+    query += "\n   JOIN pgehres.language ON (language_id=language.id)"
+    query += "\n WHERE timestamp BETWEEN '{0}' and '{1}' ".format(args['start'], args['end'])
+    if (args['substring']):
+        query += "\n AND banner LIKE '%{0}%' ".format(args['substring'])
+    if (args['campaign']):
+        query += "\n AND campaign LIKE '{0}'".format(args['campaign'])
+    if (args['country']):
+        query += "\n AND country.iso_code='{0}'".format(args['country'])
+    if (args['language']):
+        query += "\n AND language.iso_code='{0}'".format(args['language'])
+
+    query += "\n GROUP BY "
+    for i in args['group_by']:
+        if i == 'b': query += 'banner, '
+        if i == 'c': query += 'country.iso_code, '
+        if i == 'g': query += 'language.iso_code, '
+        if i == 't': query += 'campaign, '
+    query = query.rstrip(', ')
+
+    query += "\n ORDER BY "
+    if 'c' in args['group_by']: query += 'country.iso_code, '
+    if 'g' in args['group_by']: query += 'language.iso_code, '
+    if 't' in args['group_by']: query += 'campaign, '
+    query += 'banner'
+
+    query = query.rstrip(', ')
+    return query
+
+def print_results(rows):
+    for c in desc:
+        print c[0], # column title
+    print
+    for row in rows:
+        for c in row:
+            print c,
+        print
+
+class TimeTravelException(Exception):
+    pass
+
+
+if __name__ == "__main__":
+
+    args = get_options()
+
+    if (args['end'] < args['start']):
+        raise TimeTravelException("End time cannot be before start time!")
+
+    query = build_query(args)
+
+    if (not args['quiet']):
+        print query
+
+    cursor = fr_util.get_db_cursor()
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    desc = cursor.description
+
+    print_results(rows)

@@ -1,0 +1,106 @@
+#! /usr/bin/env python
+
+from datetime import datetime
+import dateutil.parser
+import dateutil.relativedelta
+import numpy
+import MySQLdb, sys, fr_util
+
+TSFORMAT = '%Y%m%d%H%M%S'
+DATEFORMAT = '%Y-%m-%d %H:%M:%S'
+
+def get_options():
+    from argparse import ArgumentParser
+    parser = ArgumentParser(
+        description="Get statistics on amounts for a given banner/email"
+        )
+
+    parser.add_argument('substring',
+        help='Banner/email substring e.g. B14_0723_mob. You can even use a regular expression if you like.')
+
+    # We'll run the date parser on these later
+    parser.add_argument('-s', '--start', dest='start',
+        help='Start time (UTC). If not specified, defaults to one month ago.')
+    parser.add_argument('-e', '--end', dest='end',
+        help='End time (UTC). If not specified, defaults to now.')
+
+    parser.add_argument('--sql', action='store_true',
+        help='Show SQL used (for debugging)')
+
+    parser.add_argument('--language', dest='language', 
+        help='Filter results to specific language')
+    parser.add_argument('--country', dest='country', 
+        help='Filter results to specific country code')
+
+    if len(sys.argv) == 1:
+        # No arguments, show instructions
+        parser.print_help()
+        sys.exit(1)
+
+    args = vars(parser.parse_args())
+    return args
+
+
+def build_query():
+    query = """SELECT
+        cc.total_amount as amount
+    FROM
+        drupal.contribution_tracking ct
+        INNER JOIN civicrm.civicrm_contribution cc ON ct.contribution_id = cc.id
+    WHERE
+        ts BETWEEN %(start_ts)s AND %(end_ts)s
+        AND ct.utm_source REGEXP %(substring)s"""
+
+    if args['country']:
+        query += "AND ct.country=%(country)s"
+
+    if args['language']:
+        query += "AND ct.language=%(language)s"
+
+    return query
+
+def get_results():
+    cursor.execute(query, args)
+    rows = cursor.fetchall()
+    return rows
+
+
+if __name__ == "__main__":
+    args = get_options()
+
+    if args['start']:
+        args['start'] = dateutil.parser.parse(args['start'])
+    else:
+        # default to 1 month ago
+        args['start'] = (datetime.now() + dateutil.relativedelta.relativedelta(months = -1))
+
+    if args['end']:
+        args['end'] = dateutil.parser.parse(args['end'])
+    else:
+        # default to now
+        args['end'] = datetime.now()
+
+    # Timestamp format for queries
+    args['start_ts'] = args['start'].strftime(TSFORMAT)
+    args['end_ts']   = args['end'].strftime(TSFORMAT)
+
+    cursor = fr_util.get_db_cursor()
+    query  = build_query()
+    rows   = get_results()
+    if args['sql']:
+        print cursor._last_executed
+
+    if args['country']:
+        print "Country: " + args['country']
+    if args['language']:
+        print "Language: " + args['language']
+
+    print "From: " + args['start'].strftime(DATEFORMAT)
+    print "To: "   + args['end'].strftime(DATEFORMAT)
+    print
+    amounts = [float(r[0]) for r in rows]
+    # print amounts
+    print "Number of donations: {0}".format( len(amounts) )
+    print "Total amount:  ${:.2f}".format( sum(amounts) )
+    print "Mean amount:   ${:.2f}".format( numpy.mean(amounts) )
+    print "Median amount: ${:.2f}".format( numpy.median(amounts) )
